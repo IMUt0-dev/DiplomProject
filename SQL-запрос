@@ -1,0 +1,1051 @@
+-- Таблица category - Категория
+CREATE TABLE category (
+    category_id   SERIAL PRIMARY KEY,
+    name          VARCHAR(100) NOT NULL,
+    description   TEXT,
+    parent_id     INTEGER,
+    CONSTRAINT fk_category_parent
+        FOREIGN KEY (parent_id)
+        REFERENCES category(category_id)
+        ON DELETE SET NULL
+);
+
+-- Индексы для category
+CREATE INDEX idx_category_parent ON category(parent_id);
+CREATE UNIQUE INDEX idx_category_name_parent ON category(name, COALESCE(parent_id, -1));
+
+COMMENT ON TABLE category IS 'Иерархические категории товаров. Используется модель Adjacency List.';
+COMMENT ON COLUMN category.parent_id IS 'Ссылка на родительскую категорию для построения иерархии.';
+
+-- Таблица manufacturer - Производитель
+CREATE TABLE manufacturer (
+    manufacturer_id SERIAL PRIMARY KEY,
+    name            VARCHAR(100) NOT NULL,
+    country         VARCHAR(50),
+    contact_info    TEXT
+);
+
+-- Индексы для manufacturer
+CREATE UNIQUE INDEX idx_manufacturer_name ON manufacturer(name);
+
+COMMENT ON TABLE manufacturer IS 'Производители электроники. Выделение в отдельную таблицу устраняет транзитивные зависимости.';
+
+-- Таблица product - Товар
+CREATE TABLE product (
+    product_id      SERIAL PRIMARY KEY,
+    article_number  VARCHAR(30) UNIQUE NOT NULL,
+    name            VARCHAR(255) NOT NULL,
+    description     TEXT,
+    price           NUMERIC(10, 2) NOT NULL CHECK (price >= 0),
+    is_available    BOOLEAN DEFAULT TRUE,
+    category_id     INTEGER NOT NULL,
+    manufacturer_id INTEGER NOT NULL,
+    specifications  JSONB,
+    CONSTRAINT fk_product_category
+        FOREIGN KEY (category_id)
+        REFERENCES category(category_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_product_manufacturer
+        FOREIGN KEY (manufacturer_id)
+        REFERENCES manufacturer(manufacturer_id)
+        ON DELETE RESTRICT
+);
+
+-- Индексы для product
+CREATE INDEX idx_product_category ON product(category_id);
+CREATE INDEX idx_product_manufacturer ON product(manufacturer_id);
+CREATE INDEX idx_product_price ON product(price);
+CREATE INDEX idx_product_specifications ON product USING GIN (specifications);
+CREATE INDEX idx_product_name ON product USING BTREE (name);
+CREATE INDEX idx_product_available ON product(is_available);
+
+COMMENT ON TABLE product IS 'Основной каталог товаров. Гибридный подход: фиксированные поля + JSONB для динамических атрибутов.';
+COMMENT ON COLUMN product.specifications IS 'Динамические технические характеристики в JSONB: процессор, память, экран и т.д.';
+
+-- Таблица customer - Покупатель
+CREATE TABLE customer (
+    customer_id     SERIAL PRIMARY KEY,
+    email           VARCHAR(150) UNIQUE NOT NULL,
+    password_hash   VARCHAR(255) NOT NULL,
+    first_name      VARCHAR(50) NOT NULL,
+    last_name       VARCHAR(50) NOT NULL,
+    phone           VARCHAR(20),
+    registration_date TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Индексы для customer
+CREATE UNIQUE INDEX idx_customer_email ON customer(email);
+CREATE INDEX idx_customer_registration ON customer(registration_date);
+
+COMMENT ON TABLE customer IS 'Зарегистрированные покупатели. Пароли хранятся в виде хэша. Доступ к полю password_hash ограничен через GRANT и RLS.';
+
+-- Таблица order - Заказ
+CREATE TABLE "order" (
+    order_id        SERIAL PRIMARY KEY,
+    order_date      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'paid', 'shipped', 'delivered', 'cancelled')),
+    total_amount    NUMERIC(10, 2) NOT NULL CHECK (total_amount >= 0),
+    customer_id     INTEGER NOT NULL,
+    delivery_address TEXT,
+    CONSTRAINT fk_order_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES customer(customer_id)
+        ON DELETE RESTRICT
+);
+
+-- Индексы для order
+CREATE INDEX idx_order_customer ON "order"(customer_id);
+CREATE INDEX idx_order_date ON "order"(order_date);
+CREATE INDEX idx_order_status ON "order"(status);
+
+COMMENT ON TABLE "order" IS 'Заказы клиентов. Статусы отражают полный жизненный цикл заказа.';
+
+-- Таблица orderitem - Позиция заказа
+CREATE TABLE orderitem (
+    order_id        INTEGER NOT NULL,
+    product_id      INTEGER NOT NULL,
+    quantity        INTEGER NOT NULL CHECK (quantity > 0),
+    price_at_purchase NUMERIC(10, 2) NOT NULL CHECK (price_at_purchase >= 0),
+    CONSTRAINT pk_orderitem
+        PRIMARY KEY (order_id, product_id),
+    CONSTRAINT fk_orderitem_order
+        FOREIGN KEY (order_id)
+        REFERENCES "order"(order_id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_orderitem_product
+        FOREIGN KEY (product_id)
+        REFERENCES product(product_id)
+        ON DELETE RESTRICT
+);
+
+-- Индексы для orderitem
+CREATE INDEX idx_orderitem_order ON orderitem(order_id);
+CREATE INDEX idx_orderitem_product ON orderitem(product_id);
+
+COMMENT ON TABLE orderitem IS 'Позиции заказа. Составной первичный ключ (order_id, product_id).';
+
+-- Таблица warehouse - Склад
+CREATE TABLE warehouse (
+    warehouse_id SERIAL PRIMARY KEY,
+    name         VARCHAR(100) NOT NULL,
+    address      TEXT
+);
+
+-- Индексы для warehouse
+CREATE UNIQUE INDEX idx_warehouse_name ON warehouse(name);
+
+COMMENT ON TABLE warehouse IS 'Склады интернет-магазина.';
+
+-- Таблица stock - Остаток на складе
+CREATE TABLE stock (
+    product_id      INTEGER NOT NULL,
+    warehouse_id    INTEGER NOT NULL,
+    quantity_on_hand INTEGER NOT NULL DEFAULT 0 CHECK (quantity_on_hand >= 0),
+    CONSTRAINT pk_stock
+        PRIMARY KEY (product_id, warehouse_id),
+    CONSTRAINT fk_stock_product
+        FOREIGN KEY (product_id)
+        REFERENCES product(product_id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_stock_warehouse
+        FOREIGN KEY (warehouse_id)
+        REFERENCES warehouse(warehouse_id)
+        ON DELETE RESTRICT
+);
+
+-- Индексы для stock
+CREATE INDEX idx_stock_warehouse ON stock(warehouse_id);
+CREATE INDEX idx_stock_quantity ON stock(quantity_on_hand);
+
+COMMENT ON TABLE stock IS 'Остатки товаров на складах. Составной ключ. ON DELETE CASCADE для product гарантирует удаление остатков при удалении товара.';
+
+-- Таблица payment - Платёж
+CREATE TABLE payment (
+    payment_id      SERIAL PRIMARY KEY,
+    order_id        INTEGER NOT NULL,
+    amount          NUMERIC(10, 2) NOT NULL CHECK (amount >= 0),
+    payment_method  VARCHAR(30) NOT NULL,
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'completed', 'failed', 'refunded')),
+    transaction_date TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT fk_payment_order
+        FOREIGN KEY (order_id)
+        REFERENCES "order"(order_id)
+        ON DELETE RESTRICT
+);
+
+-- Индексы для payment
+CREATE INDEX idx_payment_order ON payment(order_id);
+CREATE INDEX idx_payment_status ON payment(status);
+
+COMMENT ON TABLE payment IS 'Платежи по заказам. Хранение информации о транзакциях для финансового учёта.';
+
+-- Таблица delivery  - Доставка
+CREATE TABLE delivery (
+    delivery_id             SERIAL PRIMARY KEY,
+    order_id                INTEGER UNIQUE NOT NULL,
+    tracking_number         VARCHAR(50),
+    courier_name            VARCHAR(100),
+    estimated_delivery_date DATE,
+    actual_delivery_date    DATE,
+    status                  VARCHAR(20) DEFAULT 'pending'
+                            CHECK (status IN ('pending', 'in_transit', 'delivered', 'failed')),
+    CONSTRAINT fk_delivery_order
+        FOREIGN KEY (order_id)
+        REFERENCES "order"(order_id)
+        ON DELETE CASCADE
+);
+
+-- Индексы для delivery
+CREATE INDEX idx_delivery_status ON delivery(status);
+CREATE INDEX idx_delivery_courier ON delivery(courier_name);
+
+COMMENT ON TABLE delivery IS 'Данные о доставке заказов. Связь 1:1 с таблицей Order через уникальный внешний ключ.';
+
+-- Таблица productattribute - Атрибуты товара
+CREATE TABLE productattribute (
+    attribute_id    SERIAL PRIMARY KEY,
+    product_id      INTEGER NOT NULL,
+    attribute_name  VARCHAR(100) NOT NULL,
+    attribute_value VARCHAR(255) NOT NULL,
+    CONSTRAINT fk_productattribute_product
+        FOREIGN KEY (product_id)
+        REFERENCES product(product_id)
+        ON DELETE CASCADE
+);
+
+-- Индексы для productattribute
+CREATE INDEX idx_productattribute_product ON productattribute(product_id);
+CREATE INDEX idx_productattribute_name_value ON productattribute(attribute_name, attribute_value);
+
+COMMENT ON TABLE productattribute IS 'Дополнительные атрибуты товаров в формате EAV для гибкого управления характеристиками.';
+
+-- SQL-запросы ниже на добавления в базу данных тестовой информации была создана нейросетью DeepSeek( со стороки №228 - №631 )
+-- DeepSeek — это нейросеть. Она предназначена для обработки текстовых запросов, генерации контента, анализа данных и решения других задач.
+-- https://www.deepseek.com/
+
+-- ============================================================
+-- МАССОВОЕ НАПОЛНЕНИЕ БАЗЫ ДАННЫХ ТЕСТОВЫМИ ДАННЫМИ
+-- СУБД: PostgreSQL 16
+-- ============================================================
+-- ============================================================
+-- 1. ПРОИЗВОДИТЕЛИ (10 компаний)
+-- ============================================================
+INSERT INTO manufacturer (name, country, contact_info) VALUES
+('Samsung', 'Южная Корея', 'Горячая линия: 8-800-555-55-55, support@samsung.ru'),
+('Apple', 'США', 'Горячая линия: 8-800-333-33-33, support@apple.com'),
+('Sony', 'Япония', 'Горячая линия: 8-800-111-11-11, support@sony.ru'),
+('Xiaomi', 'Китай', 'Горячая линия: 8-800-222-22-22, support@xiaomi.ru'),
+('LG', 'Южная Корея', 'Горячая линия: 8-800-444-44-44, support@lg.ru'),
+('Huawei', 'Китай', 'Горячая линия: 8-800-666-66-66, support@huawei.ru'),
+('Dell', 'США', 'Горячая линия: 8-800-777-77-77, support@dell.com'),
+('Lenovo', 'Китай', 'Горячая линия: 8-800-888-88-88, support@lenovo.ru'),
+('Asus', 'Тайвань', 'Горячая линия: 8-800-999-99-99, support@asus.ru'),
+('Bosch', 'Германия', 'Горячая линия: 8-800-101-10-10, support@bosch.ru');
+
+-- ============================================================
+-- 2. КАТЕГОРИИ ТОВАРОВ (50 категорий, иерархия до 3-х уровней)
+-- ============================================================
+-- Уровень 1 (корневые категории)
+INSERT INTO category (category_id, name, description, parent_id) VALUES
+(1, 'Электроника', 'Корневая категория всей электроники', NULL),
+(2, 'Бытовая техника', 'Крупная и мелкая бытовая техника для дома и кухни', NULL);
+
+-- Уровень 2 (подкатегории)
+INSERT INTO category (category_id, name, description, parent_id) VALUES
+(3, 'Смартфоны и гаджеты', 'Мобильные телефоны, смартфоны и аксессуары', 1),
+(4, 'Ноутбуки и компьютеры', 'Портативные и стационарные компьютеры', 1),
+(5, 'Планшеты', 'Планшетные компьютеры и электронные книги', 1),
+(6, 'Аудио и видео', 'Наушники, колонки, плееры, аудиотехника', 1),
+(7, 'Фото и видео', 'Камеры, объективы, аксессуары', 1),
+(8, 'Телевизоры', 'Телевизоры и аксессуары', 1),
+(9, 'Игровые приставки', 'Игровые консоли и комплектующие', 1),
+(10, 'Носимые устройства', 'Умные часы, браслеты, очки', 1),
+(11, 'Крупная бытовая техника', 'Холодильники, стиральные машины, плиты', 2),
+(12, 'Мелкая бытовая техника', 'Пылесосы, утюги, чайники, микроволновки', 2),
+(13, 'Климатическая техника', 'Кондиционеры, обогреватели, увлажнители', 2),
+(14, 'Техника для кухни', 'Блендеры, миксеры, мультиварки', 2);
+
+-- Уровень 3 (конечные категории)
+INSERT INTO category (category_id, name, description, parent_id) VALUES
+-- Смартфоны и гаджеты (3)
+(15, 'Смартфоны', 'Мобильные телефоны с сенсорным экраном', 3),
+(16, 'Кнопочные телефоны', 'Телефоны с физической клавиатурой', 3),
+(17, 'Аксессуары для смартфонов', 'Чехлы, защитные стёкла, зарядки', 3),
+-- Ноутбуки и компьютеры (4)
+(18, 'Ноутбуки', 'Портативные ноутбуки и нетбуки', 4),
+(19, 'Моноблоки', 'Компьютеры всё-в-одном', 4),
+(20, 'Мониторы', 'Компьютерные мониторы', 4),
+(21, 'Клавиатуры и мыши', 'Периферийные устройства', 4),
+-- Планшеты (5)
+(22, 'Планшеты iPad', 'Планшеты Apple iPad', 5),
+(23, 'Планшеты Android', 'Планшеты на ОС Android', 5),
+-- Аудио и видео (6)
+(24, 'Наушники TWS', 'Беспроводные наушники-вкладыши', 6),
+(25, 'Полноразмерные наушники', 'Накладные и полноразмерные наушники', 6),
+(26, 'Портативные колонки', 'Bluetooth-колонки', 6),
+(27, 'MP3-плееры', 'Портативные аудиоплееры', 6),
+-- Фото и видео (7)
+(28, 'Зеркальные камеры', 'DSLR-камеры', 7),
+(29, 'Беззеркальные камеры', 'Системные камеры', 7),
+(30, 'Экшн-камеры', 'Камеры для активного отдыха', 7),
+-- Телевизоры (8)
+(31, 'OLED-телевизоры', 'Телевизоры на OLED-матрицах', 8),
+(32, 'QLED/Neo QLED', 'Телевизоры на квантовых точках', 8),
+(33, '4K UHD телевизоры', 'Телевизоры с разрешением 4K', 8),
+-- Игровые приставки (9)
+(34, 'PlayStation', 'Консоли Sony PlayStation', 9),
+(35, 'Xbox', 'Консоли Microsoft Xbox', 9),
+(36, 'Nintendo', 'Консоли Nintendo', 9),
+-- Носимые устройства (10)
+(37, 'Умные часы', 'Смарт-часы', 10),
+(38, 'Фитнес-браслеты', 'Трекеры активности', 10),
+-- Крупная бытовая техника (11)
+(39, 'Холодильники', 'Бытовые холодильники и морозильные камеры', 11),
+(40, 'Стиральные машины', 'Фронтальные и вертикальные', 11),
+(41, 'Плиты и духовые шкафы', 'Кухонные плиты', 11),
+-- Мелкая бытовая техника (12)
+(42, 'Пылесосы', 'Роботы-пылесосы, вертикальные, проводные', 12),
+(43, 'Микроволновые печи', 'СВЧ-печи', 12),
+(44, 'Утюги и парогенераторы', 'Гладильные системы', 12),
+-- Климатическая техника (13)
+(45, 'Кондиционеры', 'Сплит-системы', 13),
+(46, 'Увлажнители воздуха', 'Ультразвуковые и паровые', 13),
+-- Техника для кухни (14)
+(47, 'Блендеры', 'Погружные и стационарные', 14),
+(48, 'Мультиварки', 'Многофункциональные', 14),
+(49, 'Кофемашины', 'Рожковые, капсульные, автоматические', 14),
+(50, 'Тостеры', 'Кухонные тостеры', 14);
+
+-- Сброс последовательности
+SELECT setval('category_category_id_seq', 50);
+
+-- ============================================================
+-- 3. ТОВАРЫ (1000 моделей с JSONB-спецификациями)
+-- ============================================================
+-- Используем PL/pgSQL для генерации 1000 товаров с реалистичными данными
+DO $$
+DECLARE
+    i INTEGER;
+    cat_id INTEGER;
+    man_id INTEGER;
+    base_name TEXT;
+    product_price NUMERIC(10,2);
+    specs JSONB;
+BEGIN
+    FOR i IN 1..1000 LOOP
+        -- Распределяем товары по категориям (конечные категории 15-50)
+        cat_id := FLOOR(RANDOM() * 36 + 15)::INTEGER; -- категории 15..50
+        man_id := FLOOR(RANDOM() * 10 + 1)::INTEGER;   -- производители 1..10
+
+        -- Формируем имя и характеристики в зависимости от категории
+        CASE
+            WHEN cat_id = 15 THEN -- Смартфоны
+                base_name := (ARRAY['Galaxy S', 'Galaxy A', 'Galaxy Z', 'iPhone', 'Xperia', 'Redmi Note', 'POCO', 'Pura'])[FLOOR(RANDOM() * 8 + 1)] || ' ' || (FLOOR(RANDOM() * 24 + 1) + 2020)::TEXT;
+                product_price := (FLOOR(RANDOM() * 150000 + 5000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'screen', (ARRAY['6.1"', '6.5"', '6.7"', '6.8"', '6.4"'])[FLOOR(RANDOM() * 5 + 1)],
+                    'processor', (ARRAY['Snapdragon 8 Gen 3', 'Exynos 2400', 'A17 Pro', 'Dimensity 9200', 'Snapdragon 7+ Gen 2'])[FLOOR(RANDOM() * 5 + 1)],
+                    'ram', (ARRAY['4GB', '6GB', '8GB', '12GB', '16GB'])[FLOOR(RANDOM() * 5 + 1)],
+                    'storage', (ARRAY['64GB', '128GB', '256GB', '512GB', '1TB'])[FLOOR(RANDOM() * 5 + 1)],
+                    'battery', (FLOOR(RANDOM() * 4000 + 2000))::TEXT || 'mAh',
+                    'camera', (ARRAY['48MP', '50MP', '108MP', '200MP', '12MP'])[FLOOR(RANDOM() * 5 + 1)]
+                );
+
+            WHEN cat_id = 18 THEN -- Ноутбуки
+                base_name := (ARRAY['MacBook', 'Galaxy Book', 'ThinkPad', 'XPS', 'VAIO', 'ZenBook', 'ROG'])[FLOOR(RANDOM() * 7 + 1)] || ' ' || (FLOOR(RANDOM() * 20 + 1) + 2018)::TEXT;
+                product_price := (FLOOR(RANDOM() * 250000 + 30000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'screen', (ARRAY['13.3"', '14"', '15.6"', '16"', '17.3"'])[FLOOR(RANDOM() * 5 + 1)],
+                    'processor', (ARRAY['Intel Core i5', 'Intel Core i7', 'Intel Core i9', 'Apple M2', 'Apple M3', 'AMD Ryzen 7'])[FLOOR(RANDOM() * 6 + 1)],
+                    'ram', (ARRAY['8GB', '16GB', '32GB', '64GB'])[FLOOR(RANDOM() * 4 + 1)],
+                    'storage', (ARRAY['256GB SSD', '512GB SSD', '1TB SSD', '2TB SSD'])[FLOOR(RANDOM() * 4 + 1)],
+                    'battery', (FLOOR(RANDOM() * 15 + 5))::TEXT || ' часов',
+                    'weight', (FLOOR(RANDOM() * 150 + 100))::TEXT || ' г'
+                );
+
+            WHEN cat_id IN (24, 25) THEN -- Наушники
+                base_name := (ARRAY['AirPods', 'Galaxy Buds', 'WH-1000XM', 'WF-1000XM', 'Redmi Buds', 'QuietComfort'])[FLOOR(RANDOM() * 6 + 1)] || ' ' || (FLOOR(RANDOM() * 5 + 1))::TEXT;
+                product_price := (FLOOR(RANDOM() * 60000 + 1000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'type', (ARRAY['TWS вкладыши', 'Полноразмерные', 'Накладные'])[FLOOR(RANDOM() * 3 + 1)],
+                    'anc', (ARRAY[true, false])[FLOOR(RANDOM() * 2 + 1)],
+                    'battery', (FLOOR(RANDOM() * 30 + 5))::TEXT || ' часов',
+                    'wireless', 'Bluetooth 5.3',
+                    'waterproof', (ARRAY['IPX4', 'IPX5', 'IPX7', 'Нет'])[FLOOR(RANDOM() * 4 + 1)]
+                );
+
+            WHEN cat_id IN (37, 38) THEN -- Умные часы / фитнес-браслеты
+                base_name := (ARRAY['Galaxy Watch', 'Apple Watch', 'Mi Band', 'Forerunner', 'Venu'])[FLOOR(RANDOM() * 5 + 1)] || ' ' || (FLOOR(RANDOM() * 9 + 1))::TEXT;
+                product_price := (FLOOR(RANDOM() * 100000 + 3000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'screen', (FLOOR(RANDOM() * 2 + 1))::TEXT || '.' || (FLOOR(RANDOM() * 9 + 1))::TEXT || '"',
+                    'battery', (FLOOR(RANDOM() * 30 + 10))::TEXT || ' часов',
+                    'waterproof', (ARRAY['5ATM', 'WR50', 'IP68', 'нет'])[FLOOR(RANDOM() * 4 + 1)],
+                    'heart_rate', (ARRAY[true, false])[FLOOR(RANDOM() * 2 + 1)],
+                    'gps', (ARRAY[true, false])[FLOOR(RANDOM() * 2 + 1)]
+                );
+
+            WHEN cat_id = 39 THEN -- Холодильники
+                base_name := (ARRAY['Samsung RS', 'LG InstaView', 'Bosch Serie', 'Xiaomi Mi Smart Fridge'])[FLOOR(RANDOM() * 4 + 1)] || ' ' || (FLOOR(RANDOM() * 100 + 200))::TEXT;
+                product_price := (FLOOR(RANDOM() * 250000 + 25000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'type', (ARRAY['Side-by-Side', 'French Door', 'Двухкамерный', 'Морозильный ларь'])[FLOOR(RANDOM() * 4 + 1)],
+                    'total_volume', (FLOOR(RANDOM() * 400 + 300))::TEXT || ' л',
+                    'energy', (ARRAY['A', 'A+', 'A++', 'A+++'])[FLOOR(RANDOM() * 4 + 1)],
+                    'no_frost', (ARRAY[true, false])[FLOOR(RANDOM() * 2 + 1)]
+                );
+
+            WHEN cat_id = 42 THEN -- Пылесосы
+                base_name := (ARRAY['Mi Robot Vacuum', 'Dyson V', 'Samsung Jet', 'LG CordZero', 'iRobot Roomba'])[FLOOR(RANDOM() * 5 + 1)] || ' ' || (FLOOR(RANDOM() * 20 + 1))::TEXT;
+                product_price := (FLOOR(RANDOM() * 80000 + 5000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'type', (ARRAY['Робот-пылесос', 'Вертикальный', 'Проводной'])[FLOOR(RANDOM() * 3 + 1)],
+                    'power', (FLOOR(RANDOM() * 300 + 200))::TEXT || ' Вт',
+                    'battery', (FLOOR(RANDOM() * 120 + 30))::TEXT || ' мин',
+                    'hepa_filter', (ARRAY[true, false])[FLOOR(RANDOM() * 2 + 1)]
+                );
+
+            WHEN cat_id IN (31, 32, 33) THEN -- Телевизоры
+                base_name := (ARRAY['Samsung QLED', 'LG OLED', 'Sony Bravia', 'Xiaomi TV'])[FLOOR(RANDOM() * 4 + 1)] || ' ' || (ARRAY['55', '65', '75', '85'])[FLOOR(RANDOM() * 4 + 1)] || '"';
+                product_price := (FLOOR(RANDOM() * 350000 + 25000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'resolution', '4K UHD',
+                    'hdr', (ARRAY['HDR10', 'Dolby Vision', 'HDR10+'])[FLOOR(RANDOM() * 3 + 1)],
+                    'refresh_rate', (ARRAY['60Hz', '120Hz', '144Hz'])[FLOOR(RANDOM() * 3 + 1)]
+                );
+
+            WHEN cat_id IN (34, 35, 36) THEN -- Игровые приставки
+                base_name := (ARRAY['PlayStation 5', 'Xbox Series X', 'Nintendo Switch'])[FLOOR(RANDOM() * 3 + 1)];
+                product_price := (FLOOR(RANDOM() * 80000 + 25000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'storage', (ARRAY['500GB', '1TB', '2TB'])[FLOOR(RANDOM() * 3 + 1)],
+                    'resolution', '4K',
+                    'frame_rate', (ARRAY['60fps', '120fps'])[FLOOR(RANDOM() * 2 + 1)]
+                );
+
+            WHEN cat_id = 40 THEN -- Стиральные машины
+                base_name := (ARRAY['Samsung WW', 'LG F', 'Bosch Serie'])[FLOOR(RANDOM() * 3 + 1)] || (FLOOR(RANDOM() * 90 + 10))::TEXT;
+                product_price := (FLOOR(RANDOM() * 100000 + 20000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'type', (ARRAY['Фронтальная', 'Вертикальная'])[FLOOR(RANDOM() * 2 + 1)],
+                    'load', (ARRAY['6 кг', '7 кг', '8 кг', '9 кг', '10 кг'])[FLOOR(RANDOM() * 5 + 1)],
+                    'rpm', (ARRAY[1000, 1200, 1400, 1600])[FLOOR(RANDOM() * 4 + 1)],
+                    'energy', (ARRAY['A', 'A+', 'A++', 'A+++'])[FLOOR(RANDOM() * 4 + 1)]
+                );
+
+            WHEN cat_id IN (47, 48, 49, 50) THEN -- Техника для кухни
+                base_name := (ARRAY['Bosch', 'Xiaomi', 'LG', 'Samsung'])[FLOOR(RANDOM() * 4 + 1)] || ' ' || (ARRAY['Кофемашина', 'Блендер', 'Мультиварка', 'Тостер'])[FLOOR(RANDOM() * 4 + 1)];
+                product_price := (FLOOR(RANDOM() * 50000 + 2000))::NUMERIC(10,2);
+                specs := jsonb_build_object(
+                    'power', (FLOOR(RANDOM() * 1500 + 500))::TEXT || ' Вт',
+                    'capacity', (FLOOR(RANDOM() * 5 + 1))::TEXT || ' л',
+                    'material', (ARRAY['Нержавеющая сталь', 'Пластик', 'Стекло'])[FLOOR(RANDOM() * 3 + 1)]
+                );
+
+            ELSE -- Общие категории
+                base_name := (ARRAY['Pro', 'Max', 'Ultra', 'Plus', 'Lite'])[FLOOR(RANDOM() * 5 + 1)] || ' Edition ' || (FLOOR(RANDOM() * 100 + 1))::TEXT;
+                product_price := (FLOOR(RANDOM() * 100000 + 1000))::NUMERIC(10,2);
+                specs := jsonb_build_object('product_type', 'Универсальная электроника');
+        END CASE;
+
+        -- Вставляем товар
+        INSERT INTO product (article_number, name, description, price, is_available, category_id, manufacturer_id, specifications)
+        VALUES (
+            'ART' || LPAD(i::TEXT, 7, '0'),
+            base_name,
+            'Высококачественный ' || base_name || ' от ведущего производителя. Современные технологии и надёжность.',
+            product_price,
+            CASE WHEN RANDOM() < 0.9 THEN TRUE ELSE FALSE END, -- 90% товаров доступны
+            cat_id,
+            man_id,
+            specs
+        );
+    END LOOP;
+END $$;
+
+-- ============================================================
+-- 4. СКЛАДЫ (3 склада)
+-- ============================================================
+INSERT INTO warehouse (name, address) VALUES
+('Основной склад (Москва)', 'г. Москва, ул. Складская, д. 1, стр. 1'),
+('Региональный склад (Санкт-Петербург)', 'г. Санкт-Петербург, ул. Товарная, д. 15'),
+('Дальневосточный склад (Владивосток)', 'г. Владивосток, ул. Портовая, д. 25');
+
+-- ============================================================
+-- 5. СКЛАДСКИЕ ОСТАТКИ (от 0 до 50 единиц на каждом складе)
+-- ============================================================
+INSERT INTO stock (product_id, warehouse_id, quantity_on_hand)
+SELECT
+    p.product_id,
+    w.warehouse_id,
+    FLOOR(RANDOM() * 51)::INTEGER
+FROM
+    product p
+    CROSS JOIN warehouse w;
+
+-- ============================================================
+-- 6. КЛИЕНТЫ (500 записей)
+-- ============================================================
+INSERT INTO customer (email, password_hash, first_name, last_name, phone, registration_date)
+SELECT
+    'user' || g.i || '@' || (ARRAY['gmail.com', 'mail.ru', 'yandex.ru', 'outlook.com'])[FLOOR(RANDOM() * 4 + 1)],
+    '$2a$12$' || MD5(g.i::TEXT),
+    (ARRAY['Александр', 'Михаил', 'Иван', 'Дмитрий', 'Андрей', 'Сергей', 'Павел', 'Николай', 'Владимир', 'Роман',
+           'Мария', 'Елена', 'Анна', 'Ольга', 'Татьяна', 'Екатерина', 'Ирина', 'Дарья', 'Светлана', 'Наталья'])[FLOOR(RANDOM() * 20 + 1)],
+    (ARRAY['Иванов', 'Петров', 'Сидоров', 'Смирнов', 'Кузнецов', 'Попов', 'Васильев', 'Морозов', 'Новиков', 'Козлов',
+           'Зайцева', 'Фёдорова', 'Белова', 'Григорьева', 'Лебедева', 'Соколова', 'Волкова', 'Тарасова', 'Михайлова', 'Романова'])[FLOOR(RANDOM() * 20 + 1)],
+    '+79' || LPAD(FLOOR(RANDOM() * 999999999)::TEXT, 9, '0'),
+    TIMESTAMPTZ '2025-01-01 10:00:00+03' + (RANDOM() * INTERVAL '365 days')
+FROM generate_series(1, 500) AS g(i);
+
+-- ============================================================
+-- 7. ЗАКАЗЫ (500 завершённых + 100 активных)
+-- ============================================================
+
+-- 500 завершённых заказов
+INSERT INTO "order" (order_date, status, total_amount, customer_id, delivery_address)
+SELECT
+    TIMESTAMPTZ '2025-01-01 10:00:00+03' + (RANDOM() * INTERVAL '300 days'),
+    (ARRAY['paid', 'shipped', 'delivered'])[FLOOR(RANDOM() * 3 + 1)],
+    0, -- будет пересчитано после добавления позиций
+    FLOOR(RANDOM() * 500 + 1)::INTEGER, -- случайный клиент из 500
+    (ARRAY[
+        'г. Москва, ул. Тверская, д. ' || FLOOR(RANDOM() * 100 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 100 + 1)::TEXT,
+        'г. Санкт-Петербург, Невский пр., д. ' || FLOOR(RANDOM() * 150 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 100 + 1)::TEXT,
+        'г. Казань, ул. Баумана, д. ' || FLOOR(RANDOM() * 50 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 50 + 1)::TEXT,
+        'г. Екатеринбург, ул. Мира, д. ' || FLOOR(RANDOM() * 80 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 60 + 1)::TEXT,
+        'г. Новосибирск, ул. Красная, д. ' || FLOOR(RANDOM() * 70 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 40 + 1)::TEXT,
+        'г. Владивосток, ул. Светланская, д. ' || FLOOR(RANDOM() * 60 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 30 + 1)::TEXT
+    ])[FLOOR(RANDOM() * 6 + 1)]
+FROM generate_series(1, 500);
+
+-- 100 активных заказов (статус 'pending')
+INSERT INTO "order" (order_date, status, total_amount, customer_id, delivery_address)
+SELECT
+    TIMESTAMPTZ '2025-10-01 10:00:00+03' + (RANDOM() * INTERVAL '30 days'),
+    'pending',
+    0,
+    FLOOR(RANDOM() * 500 + 1)::INTEGER,
+    (ARRAY[
+        'г. Москва, ул. Тверская, д. ' || FLOOR(RANDOM() * 100 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 100 + 1)::TEXT,
+        'г. Санкт-Петербург, Невский пр., д. ' || FLOOR(RANDOM() * 150 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 100 + 1)::TEXT,
+        'г. Казань, ул. Баумана, д. ' || FLOOR(RANDOM() * 50 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 50 + 1)::TEXT,
+        'г. Екатеринбург, ул. Мира, д. ' || FLOOR(RANDOM() * 80 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 60 + 1)::TEXT,
+        'г. Новосибирск, ул. Красная, д. ' || FLOOR(RANDOM() * 70 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 40 + 1)::TEXT,
+        'г. Владивосток, ул. Светланская, д. ' || FLOOR(RANDOM() * 60 + 1)::TEXT || ', кв. ' || FLOOR(RANDOM() * 30 + 1)::TEXT
+    ])[FLOOR(RANDOM() * 6 + 1)]
+FROM generate_series(1, 100);
+
+-- ============================================================
+-- 8. ПОЗИЦИИ ЗАКАЗОВ (OrderItem)
+-- Каждый заказ содержит от 1 до 5 товаров
+-- ============================================================
+DO $$
+DECLARE
+    order_rec RECORD;
+    product_count INTEGER;
+    j INTEGER;
+    selected_product_id INTEGER;
+    selected_quantity INTEGER;
+    selected_price NUMERIC(10,2);
+BEGIN
+    FOR order_rec IN SELECT order_id FROM "order" LOOP
+        product_count := FLOOR(RANDOM() * 5 + 1)::INTEGER; -- 1..5 товаров
+        FOR j IN 1..product_count LOOP
+            selected_product_id := FLOOR(RANDOM() * 1000 + 1)::INTEGER; -- товар 1..1000
+            selected_quantity := FLOOR(RANDOM() * 3 + 1)::INTEGER; -- 1-3 штуки
+            SELECT price INTO selected_price
+            FROM product
+            WHERE product_id = selected_product_id;
+
+            INSERT INTO orderitem (order_id, product_id, quantity, price_at_purchase)
+            VALUES (order_rec.order_id, selected_product_id, selected_quantity, selected_price)
+            ON CONFLICT (order_id, product_id) DO NOTHING;
+        END LOOP;
+
+        -- Обновляем общую сумму заказа
+        UPDATE "order" o
+        SET total_amount = (
+            SELECT COALESCE(SUM(oi.quantity * oi.price_at_purchase), 0)
+            FROM orderitem oi
+            WHERE oi.order_id = o.order_id
+        )
+        WHERE o.order_id = order_rec.order_id;
+    END LOOP;
+END $$;
+
+-- ============================================================
+-- 9. ПЛАТЕЖИ (Payment)
+-- Завершённые заказы имеют оплату, активные — частично
+-- ============================================================
+INSERT INTO payment (order_id, amount, payment_method, status, transaction_date)
+SELECT
+    o.order_id,
+    o.total_amount,
+    (ARRAY['card', 'sbp', 'yoomoney', 'bank_transfer'])[FLOOR(RANDOM() * 4 + 1)],
+    CASE
+        WHEN o.status IN ('paid', 'shipped', 'delivered') THEN 'completed'
+        WHEN o.status = 'cancelled' THEN 'failed'
+        ELSE 'pending'
+    END,
+    o.order_date + INTERVAL '5 minutes'
+FROM "order" o;
+
+-- Для некоторых заказов создаём частичные оплаты
+INSERT INTO payment (order_id, amount, payment_method, status, transaction_date)
+SELECT
+    o.order_id,
+    ROUND((o.total_amount * (RANDOM() * 0.5 + 0.3))::NUMERIC, 2), -- 30-80% от суммы
+    (ARRAY['card', 'sbp', 'yoomoney', 'bank_transfer'])[FLOOR(RANDOM() * 4 + 1)],
+    'pending',
+    o.order_date + INTERVAL '30 minutes'
+FROM "order" o
+WHERE RANDOM() < 0.1; -- ~10% заказов имеют частичную предоплату
+
+-- ============================================================
+-- 10. ДОСТАВКИ (Delivery)
+-- ============================================================
+INSERT INTO delivery (order_id, tracking_number, courier_name, estimated_delivery_date, actual_delivery_date, status)
+SELECT
+    o.order_id,
+    'TRK' || LPAD(o.order_id::TEXT, 10, '0'),
+    (ARRAY['CDEK', 'Boxberry', 'Почта России', 'Яндекс Доставка', 'DPD', 'СберЛогистика'])[FLOOR(RANDOM() * 6 + 1)],
+    o.order_date::DATE + INTERVAL '3 days',
+    CASE
+        WHEN o.status = 'delivered' THEN o.order_date::DATE + INTERVAL '2 days'
+        ELSE NULL
+    END,
+    CASE
+        WHEN o.status = 'delivered' THEN 'delivered'
+        WHEN o.status = 'shipped' THEN 'in_transit'
+        WHEN o.status = 'paid' THEN 'pending'
+        ELSE 'pending'
+    END
+FROM "order" o
+WHERE o.status IN ('paid', 'shipped', 'delivered', 'pending');
+
+-- ============================================================
+-- КОНЕЦ
+-- ============================================================
+
+-- Представление v_product_catalog
+CREATE VIEW v_product_catalog AS
+SELECT
+    p.product_id,
+    p.article_number,
+    p.name AS product_name,
+    p.price,
+    p.specifications->>'processor' AS processor,
+    p.specifications->>'ram' AS ram,
+    c.name AS category_name,
+    m.name AS manufacturer_name
+FROM product p
+JOIN category c ON p.category_id = c.category_id
+JOIN manufacturer m ON p.manufacturer_id = m.manufacturer_id
+WHERE p.is_available = TRUE;
+
+COMMENT ON VIEW v_product_catalog IS 'Полное представление товара для витрины.';
+
+-- Представление v_customer_orders
+CREATE OR REPLACE VIEW v_customer_orders AS
+SELECT
+    o.customer_id,
+    c.email,
+    c.first_name || ' ' || c.last_name AS customer_name,
+    o.order_id,
+    o.order_date,
+    o.status AS order_status,
+    o.total_amount,
+    COUNT(oi.product_id) AS items_count,
+    STRING_AGG(p.name, ', ' ORDER BY p.name) AS product_list,
+    STRING_AGG(
+        p.name || ' ×' || oi.quantity::TEXT || ' (' || oi.price_at_purchase::TEXT || ' ₽)',
+        '; '
+        ORDER BY p.name
+    ) AS order_details,
+    d.tracking_number,
+    d.status AS delivery_status,
+    d.estimated_delivery_date
+FROM
+    "order" o
+    JOIN customer c ON o.customer_id = c.customer_id
+    JOIN orderitem oi ON o.order_id = oi.order_id
+    JOIN product p ON oi.product_id = p.product_id
+    LEFT JOIN delivery d ON o.order_id = d.order_id
+GROUP BY
+    o.customer_id, c.email, c.first_name, c.last_name,
+    o.order_id, o.order_date, o.status, o.total_amount,
+    d.tracking_number, d.status, d.estimated_delivery_date
+ORDER BY
+    o.order_date DESC;
+
+COMMENT ON VIEW v_customer_orders IS 'История заказов клиента с детализацией состава. Для отображения в личном кабинете покупателя.';
+
+-- Представление v_low_stock
+CREATE OR REPLACE VIEW v_low_stock AS
+SELECT
+    p.product_id,
+    p.name AS product_name,
+    p.article_number,
+    m.name AS manufacturer_name,
+    c.name AS category_name,
+    SUM(s.quantity_on_hand) AS total_stock,
+    COUNT(s.warehouse_id) AS warehouse_count,
+    p.price,
+    CASE
+        WHEN SUM(s.quantity_on_hand) = 0 THEN 'Нет в наличии'
+        WHEN SUM(s.quantity_on_hand) < 5 THEN 'Критический остаток'
+        WHEN SUM(s.quantity_on_hand) < 10 THEN 'Низкий остаток'
+        ELSE 'В норме'
+    END AS stock_status
+FROM
+    product p
+    JOIN manufacturer m ON p.manufacturer_id = m.manufacturer_id
+    JOIN category c ON p.category_id = c.category_id
+    LEFT JOIN stock s ON p.product_id = s.product_id
+WHERE
+    p.is_available = TRUE
+GROUP BY
+    p.product_id, p.name, p.article_number, m.name, c.name, p.price
+HAVING
+    SUM(s.quantity_on_hand) < 5
+ORDER BY
+    total_stock ASC, p.name ASC;
+
+COMMENT ON VIEW v_low_stock IS 'Товары с суммарным остатком менее 5 единиц. Для отдела закупок. Используется в аналитической отчётности.';
+
+-- Представление v_order_summary
+CREATE VIEW v_order_summary AS
+SELECT
+    o.order_id,
+    o.order_date,
+    o.status,
+    o.total_amount,
+    c.email,
+    c.first_name || ' ' || c.last_name AS customer_name,
+    d.tracking_number,
+    d.status AS delivery_status
+FROM "order" o
+JOIN customer c ON o.customer_id = c.customer_id
+LEFT JOIN delivery d ON o.order_id = d.order_id;
+
+-- Представление v_top_selling_products
+CREATE OR REPLACE VIEW v_top_selling_products AS
+SELECT
+    p.product_id,
+    p.name AS product_name,
+    p.article_number,
+    m.name AS manufacturer_name,
+    cat.name AS category_name,
+    p.price AS current_price,
+    COUNT(DISTINCT oi.order_id) AS total_orders,
+    SUM(oi.quantity) AS total_units_sold,
+    SUM(oi.quantity * oi.price_at_purchase) AS total_revenue,
+    ROUND(AVG(oi.price_at_purchase), 2) AS avg_selling_price,
+    -- Рейтинг по количеству проданных единиц
+    RANK() OVER (ORDER BY SUM(oi.quantity) DESC) AS sales_rank,
+    -- Дата последней продажи
+    MAX(o.order_date) AS last_sold_date
+FROM
+    product p
+    JOIN manufacturer m ON p.manufacturer_id = m.manufacturer_id
+    JOIN category cat ON p.category_id = cat.category_id
+    LEFT JOIN orderitem oi ON p.product_id = oi.product_id
+    LEFT JOIN "order" o ON oi.order_id = o.order_id
+        AND o.status NOT IN ('cancelled')  -- исключаем отменённые заказы
+WHERE
+    p.is_available = TRUE
+GROUP BY
+    p.product_id, p.name, p.article_number,
+    m.name, cat.name, p.price
+ORDER BY
+    total_units_sold DESC NULLS LAST;
+
+COMMENT ON VIEW v_top_selling_products IS 'Рейтинг товаров по объёму продаж. Используется для анализа спроса, формирования акций и рекомендаций.';
+
+-- Представление v_daily_revenue
+CREATE OR REPLACE VIEW v_daily_revenue AS
+SELECT
+    o.order_date::DATE AS sale_date,
+    EXTRACT(YEAR FROM o.order_date) AS sale_year,
+    EXTRACT(MONTH FROM o.order_date) AS sale_month,
+    EXTRACT(DOW FROM o.order_date) AS sale_day_of_week,
+    COUNT(DISTINCT o.order_id) AS total_orders,
+    COUNT(DISTINCT o.customer_id) AS unique_customers,
+    SUM(o.total_amount) AS daily_revenue,
+    ROUND(AVG(o.total_amount), 2) AS avg_order_value,
+    SUM(p.amount) AS total_paid,
+    SUM(CASE WHEN p.status = 'completed' THEN p.amount ELSE 0 END) AS completed_payments,
+    SUM(CASE WHEN p.status = 'refunded' THEN p.amount ELSE 0 END) AS refunded_amount
+FROM
+    "order" o
+    LEFT JOIN payment p ON o.order_id = p.order_id
+WHERE
+    o.status != 'cancelled'
+GROUP BY
+    o.order_date::DATE,
+    EXTRACT(YEAR FROM o.order_date),
+    EXTRACT(MONTH FROM o.order_date),
+    EXTRACT(DOW FROM o.order_date)
+ORDER BY
+    sale_date DESC;
+
+COMMENT ON VIEW v_daily_revenue IS 'Ежедневная финансовая отчётность: выручка, количество заказов, средний чек. Для финансового отдела и BI-аналитики.';
+
+-- Создание ролей
+-- Администратор БД - полный доступ, создаётся при инициализации
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'role_admin') THEN
+        CREATE ROLE role_admin WITH LOGIN PASSWORD 'admin_secure_password_2026' SUPERUSER;
+    END IF;
+END $$;
+
+-- Роль серверной части приложения - основной доступ к данным
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'role_app') THEN
+        CREATE ROLE role_app WITH LOGIN PASSWORD 'app_secure_password_2026';
+    END IF;
+END $$;
+
+-- Роль для аналитики и отчётов - только чтение
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'role_report') THEN
+        CREATE ROLE role_report WITH LOGIN PASSWORD 'report_secure_password_2026';
+    END IF;
+END $$;
+
+-- Роль для отдела закупок - ограниченный доступ к товарам и складам
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'role_purchasing') THEN
+        CREATE ROLE role_purchasing WITH LOGIN PASSWORD 'purchasing_secure_password_2026';
+    END IF;
+END $$;
+
+-- Роль для курьерской службы - минимальный доступ
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'role_courier') THEN
+        CREATE ROLE role_courier WITH LOGIN PASSWORD 'courier_secure_password_2026';
+    END IF;
+END $$;
+
+-- Роль для незарегистрированного посетителя витрины - только чтение каталога
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'role_anonymous') THEN
+        CREATE ROLE role_anonymous WITH LOGIN PASSWORD 'anonymous_secure_password_2026';
+    END IF;
+END $$;
+
+-- Назначение базовых привелегий
+-- Роль role_anonymous: только чтение каталога
+GRANT USAGE ON SCHEMA public TO role_anonymous;
+GRANT SELECT ON v_product_catalog TO role_anonymous;
+GRANT SELECT ON product TO role_anonymous;
+GRANT SELECT ON category TO role_anonymous;
+GRANT SELECT ON manufacturer TO role_anonymous;
+-- Запрет на всё остальное
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM role_anonymous;
+GRANT SELECT ON product, category, manufacturer TO role_anonymous;
+
+-- Роль role_app: полный доступ к данным, без изменения схемы
+GRANT USAGE ON SCHEMA public TO role_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO role_app;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO role_app;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO role_app;
+-- Но: запрет на прямое чтение хэша пароля
+REVOKE SELECT (password_hash) ON customer FROM role_app;
+-- И: запрет на изменение структуры таблиц
+REVOKE CREATE ON SCHEMA public FROM role_app;
+
+-- Роль role_report: только чтение представлений и справочников
+GRANT USAGE ON SCHEMA public TO role_report;
+GRANT SELECT ON v_product_catalog TO role_report;
+GRANT SELECT ON v_order_summary TO role_report;
+GRANT SELECT ON v_low_stock TO role_report;
+GRANT SELECT ON v_top_selling_products TO role_report;
+GRANT SELECT ON v_daily_revenue TO role_report;
+GRANT SELECT ON v_customer_orders TO role_report;
+GRANT SELECT ON category, manufacturer, warehouse TO role_report;
+-- Запрет на прямой доступ к таблицам с ПДн
+REVOKE ALL ON customer FROM role_report;
+REVOKE ALL ON "order" FROM role_report;
+REVOKE ALL ON payment FROM role_report;
+REVOKE ALL ON delivery FROM role_report;
+
+-- Роль role_purchasing: доступ к товарам и складам
+GRANT USAGE ON SCHEMA public TO role_purchasing;
+GRANT SELECT, UPDATE ON product TO role_purchasing;
+GRANT SELECT, INSERT, UPDATE ON stock TO role_purchasing;
+GRANT SELECT ON v_low_stock TO role_purchasing;
+GRANT SELECT ON v_top_selling_products TO role_purchasing;
+GRANT SELECT ON category, manufacturer, warehouse TO role_purchasing;
+-- Запрет на доступ к заказам и клиентам
+REVOKE ALL ON customer FROM role_purchasing;
+REVOKE ALL ON "order" FROM role_purchasing;
+REVOKE ALL ON orderitem FROM role_purchasing;
+REVOKE ALL ON payment FROM role_purchasing;
+REVOKE ALL ON delivery FROM role_purchasing;
+REVOKE SELECT (password_hash) ON customer FROM role_purchasing;
+
+-- Роль role_courier: только доставки
+GRANT USAGE ON SCHEMA public TO role_courier;
+GRANT SELECT, UPDATE ON delivery TO role_courier;
+GRANT SELECT ON v_order_summary TO role_courier;
+-- Запрет на всё остальное
+REVOKE ALL ON customer FROM role_courier;
+REVOKE ALL ON "order" FROM role_courier;
+REVOKE ALL ON orderitem FROM role_courier;
+REVOKE ALL ON product FROM role_courier;
+REVOKE ALL ON payment FROM role_courier;
+REVOKE ALL ON stock FROM role_courier;
+
+-- Настройка Row-Level Security
+
+-- RLS для таблицы Customer - защита персональных данных
+ALTER TABLE customer ENABLE ROW LEVEL SECURITY;
+
+-- Политика: приложение видит все строки, но без хэша пароля
+CREATE POLICY app_customer_access ON customer
+    FOR ALL
+    TO role_app
+    USING (true)
+    WITH CHECK (true);
+
+-- Политика: анонимный пользователь не видит таблицу customer вообще
+CREATE POLICY anonymous_customer_deny ON customer
+    FOR ALL
+    TO role_anonymous
+    USING (false);
+
+-- Политика: курьер не видит данные клиентов
+CREATE POLICY courier_customer_deny ON customer
+    FOR ALL
+    TO role_courier
+    USING (false);
+
+-- Политика: отдел закупок не видит данные клиентов
+CREATE POLICY purchasing_customer_deny ON customer
+    FOR ALL
+    TO role_purchasing
+    USING (false);
+
+-- RLS для таблицы Order - контекстно-зависимый доступ
+ALTER TABLE "order" ENABLE ROW LEVEL SECURITY;
+
+-- Политика: приложение видит все заказы
+CREATE POLICY app_order_access ON "order"
+    FOR ALL
+    TO role_app
+    USING (true)
+    WITH CHECK (true);
+
+-- Политика: курьер видит только те заказы, которые назначены ему для доставки
+-- Идентификатор курьера передаётся через параметр сессии
+CREATE POLICY courier_order_access ON "order"
+    FOR SELECT
+    TO role_courier
+    USING (
+        order_id IN (
+            SELECT d.order_id
+            FROM delivery d
+            WHERE d.courier_name = current_setting('app.courier_name', true)
+        )
+    );
+
+-- Политика: курьер может обновлять только статус доставки
+-- Прямое обновление таблицы Order для курьера запрещено
+CREATE POLICY courier_order_update_deny ON "order"
+    FOR UPDATE
+    TO role_courier
+    USING (false);
+
+-- Политика: анонимный пользователь не видит заказы
+CREATE POLICY anonymous_order_deny ON "order"
+    FOR ALL
+    TO role_anonymous
+    USING (false);
+
+-- Политика: отдел закупок не видит заказы
+CREATE POLICY purchasing_order_deny ON "order"
+    FOR ALL
+    TO role_purchasing
+    USING (false);
+
+-- RLS для таблицы Payment - финансовая информация
+ALTER TABLE payment ENABLE ROW LEVEL SECURITY;
+
+-- Политика: только приложение имеет полный доступ к платежам
+CREATE POLICY app_payment_access ON payment
+    FOR ALL
+    TO role_app
+    USING (true)
+    WITH CHECK (true);
+
+-- Политика: все остальные роли не видят финансовые транзакции
+CREATE POLICY deny_payment_access ON payment
+    FOR ALL
+    TO role_anonymous, role_courier, role_purchasing
+    USING (false);
+
+-- RLS для таблицы Delivery - доступ для курьеров
+ALTER TABLE delivery ENABLE ROW LEVEL SECURITY;
+
+-- Политика: курьер видит только свои доставки
+CREATE POLICY courier_delivery_access ON delivery
+    FOR SELECT
+    TO role_courier
+    USING (
+        courier_name = current_setting('app.courier_name', true)
+    );
+
+-- Политика: курьер может обновлять только свои доставки
+CREATE POLICY courier_delivery_update ON delivery
+    FOR UPDATE
+    TO role_courier
+    USING (
+        courier_name = current_setting('app.courier_name', true)
+    )
+    WITH CHECK (
+        courier_name = current_setting('app.courier_name', true)
+    );
+
+-- Политика: приложение имеет полный доступ к доставкам
+CREATE POLICY app_delivery_access ON delivery
+    FOR ALL
+    TO role_app
+    USING (true)
+    WITH CHECK (true);
+
+-- Политика: анонимный пользователь не видит доставки
+CREATE POLICY anonymous_delivery_deny ON delivery
+    FOR ALL
+    TO role_anonymous
+    USING (false);
+
+-- Вспомогательная функция для установки контекста курьера
+-- Вызывается приложением при аутентификации курьера
+CREATE OR REPLACE FUNCTION set_courier_context(courier_login TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    -- Устанавливаем параметр сессии, используемый в RLS-политиках
+    PERFORM set_config('app.courier_name', courier_login, false);
+    RETURN 'Контекст курьера установлен: ' || courier_login;
+END;
+$$;
+
+-- Привилегия на выполнение функции только для role_app
+REVOKE ALL ON FUNCTION set_courier_context(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION set_courier_context(TEXT) TO role_app;
+
+COMMENT ON FUNCTION set_courier_context(TEXT) IS 'Устанавливает контекст сессии для RLS-политик курьера. Вызывается после аутентификации курьера в приложении.';
