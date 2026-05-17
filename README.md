@@ -101,7 +101,7 @@ UNION ALL SELECT 'delivery', COUNT(*) FROM delivery;
 
 ### Тестирование представлений
 ```sql
--- Каталог товаров
+--  Каталог товаров
 SELECT * FROM v_product_catalog LIMIT 10;
 
 -- Товары с низким остатком
